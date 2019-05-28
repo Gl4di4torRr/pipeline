@@ -26,6 +26,7 @@ import (
 	"io"
 	"io/ioutil"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"go.uber.org/zap"
@@ -93,6 +94,8 @@ const (
 	unnamedInitContainerPrefix = "build-step-unnamed-"
 	// Name of the credential initialization container.
 	credsInit = "credential-initializer"
+	// Name of the working dir initialization container.
+	workingDirInit = "working-dir-initializer"
 )
 
 var (
@@ -162,6 +165,52 @@ func makeCredentialInitializer(serviceAccountName, namespace string, kubeclient 
 	}, volumes, nil
 }
 
+func makeWorkingDirScript(workingDirs map[string]bool) string {
+	script := ""
+	var orderedDirs []string
+
+	for wd := range workingDirs {
+		if wd != "" {
+			orderedDirs = append(orderedDirs, wd)
+		}
+	}
+	sort.Strings(orderedDirs)
+
+	for _, wd := range orderedDirs {
+		p := filepath.Clean(wd)
+		if rel, err := filepath.Rel(workspaceDir, p); err == nil && !strings.HasPrefix(rel, ".") {
+			if script == "" {
+				script = fmt.Sprintf("mkdir -p %s", p)
+			} else {
+				script = fmt.Sprintf("%s %s", script, p)
+			}
+		}
+	}
+
+	return script
+}
+
+func makeWorkingDirInitializer(steps []corev1.Container) *corev1.Container {
+	workingDirs := make(map[string]bool)
+	for _, step := range steps {
+		workingDirs[step.WorkingDir] = true
+	}
+
+	if script := makeWorkingDirScript(workingDirs); script != "" {
+		return &corev1.Container{
+			Name:         names.SimpleNameGenerator.RestrictLengthWithRandomSuffix(containerPrefix + workingDirInit),
+			Image:        *v1alpha1.BashNoopImage,
+			Command:      []string{"/ko-app/bash"},
+			Args:         []string{"-args", script},
+			VolumeMounts: implicitVolumeMounts,
+			Env:          implicitEnvVars,
+			WorkingDir:   workspaceDir,
+		}
+	}
+
+	return nil
+}
+
 // GetPod returns the Pod for the given pod name
 type GetPod func(string, metav1.GetOptions) (*corev1.Pod, error)
 
@@ -196,6 +245,10 @@ func MakePod(taskRun *v1alpha1.TaskRun, taskSpec v1alpha1.TaskSpec, kubeclient k
 	}
 	initContainers := []corev1.Container{*cred}
 	podContainers := []corev1.Container{}
+
+	if workingDir := makeWorkingDirInitializer(taskSpec.Steps); workingDir != nil {
+		initContainers = append(initContainers, *workingDir)
+	}
 
 	maxIndicesByResource := findMaxResourceRequest(taskSpec.Steps, corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage)
 
@@ -248,7 +301,9 @@ func MakePod(taskRun *v1alpha1.TaskRun, taskSpec v1alpha1.TaskSpec, kubeclient k
 	gibberish := hex.EncodeToString(b)
 
 	nopContainer := &corev1.Container{Name: "nop", Image: *nopImage, Command: []string{"/ko-app/nop"}}
-	entrypoint.RedirectStep(cache, len(podContainers), nopContainer, kubeclient, taskRun, logger)
+	if err := entrypoint.RedirectStep(cache, len(podContainers), nopContainer, kubeclient, taskRun, logger); err != nil {
+		return nil, err
+	}
 	podContainers = append(podContainers, *nopContainer)
 
 	mergedInitContainers, err := merge.CombineStepsWithContainerTemplate(taskSpec.ContainerTemplate, initContainers)

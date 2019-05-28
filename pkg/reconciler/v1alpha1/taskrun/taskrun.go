@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/knative/pkg/apis"
@@ -62,10 +63,22 @@ const (
 	// reasonTimedOut indicates that the TaskRun has taken longer than its configured timeout
 	reasonTimedOut = "TaskRunTimeout"
 
+	// reasonExceededResourceQuota indicates that the TaskRun failed to create a pod due to
+	// a ResourceQuota in the namespace
+	reasonExceededResourceQuota = "ExceededResourceQuota"
+
+	// reasonExceededNodeResources indicates that the TaskRun's pod has failed to start due
+	// to resource constraints on the node
+	reasonExceededNodeResources = "ExceededNodeResources"
+
 	// taskRunAgentName defines logging agent name for TaskRun Controller
 	taskRunAgentName = "taskrun-controller"
 	// taskRunControllerName defines name for TaskRun Controller
 	taskRunControllerName = "TaskRun"
+
+	// imageDigestExporterContainerName defines the name of the container that will collect the
+	// built images digest
+	imageDigestExporterContainerName = "build-step-image-digest-exporter"
 )
 
 // Reconciler implements controller.Reconciler for Configuration resources.
@@ -157,6 +170,11 @@ func (c *Reconciler) Reconcile(ctx context.Context, key string) error {
 	// If the TaskRun is just starting, this will also set the starttime,
 	// from which the timeout will immediately begin counting down.
 	tr.Status.InitializeConditions()
+	// In case node time was not synchronized, when controller has been scheduled to other nodes.
+	if tr.Status.StartTime.Sub(tr.CreationTimestamp.Time) < 0 {
+		c.Logger.Warnf("TaskRun %s createTimestamp %s is after the taskRun started %s", tr.GetRunKey(), tr.CreationTimestamp, tr.Status.StartTime)
+		tr.Status.StartTime = &tr.CreationTimestamp
+	}
 
 	if tr.IsDone() {
 		c.timeoutHandler.Release(tr)
@@ -288,17 +306,23 @@ func (c *Reconciler) reconcile(ctx context.Context, tr *v1alpha1.TaskRun) error 
 		pod, err = c.createPod(tr, rtr.TaskSpec, rtr.TaskName)
 		if err != nil {
 			// This Run has failed, so we need to mark it as failed and stop reconciling it
-			var msg string
-			if tr.Spec.TaskRef != nil {
-				msg = fmt.Sprintf("References a Task %s that doesn't exist: ", fmt.Sprintf("%s/%s", tr.Namespace, tr.Spec.TaskRef.Name))
+			var reason, msg string
+			if isExceededResourceQuotaError(err) {
+				reason = reasonExceededResourceQuota
+				msg = getExceededResourcesMessage(tr)
 			} else {
-				msg = fmt.Sprintf("References a TaskSpec with missing information: ")
+				reason = reasonCouldntGetTask
+				if tr.Spec.TaskRef != nil {
+					msg = fmt.Sprintf("Missing or invalid Task %s/%s", tr.Namespace, tr.Spec.TaskRef.Name)
+				} else {
+					msg = fmt.Sprintf("Invalid TaskSpec")
+				}
 			}
 			tr.Status.SetCondition(&apis.Condition{
 				Type:    apis.ConditionSucceeded,
 				Status:  corev1.ConditionFalse,
-				Reason:  reasonCouldntGetTask,
-				Message: fmt.Sprintf("%s %v", msg, err),
+				Reason:  reason,
+				Message: fmt.Sprintf("%s: %v", msg, err),
 			})
 			c.Recorder.Eventf(tr, corev1.EventTypeWarning, "BuildCreationFailed", "Failed to create build pod %q: %v", tr.Name, err)
 			c.Logger.Errorf("Failed to create build pod for task %q :%v", err, tr.Name)
@@ -311,9 +335,13 @@ func (c *Reconciler) reconcile(ctx context.Context, tr *v1alpha1.TaskRun) error 
 		return err
 	}
 
+	if isPodExceedingNodeResources(pod) {
+		c.Recorder.Eventf(tr, corev1.EventTypeWarning, reasonExceededNodeResources, "Insufficient resources to schedule pod %q", pod.Name)
+	}
+
 	before := tr.Status.GetCondition(apis.ConditionSucceeded)
 
-	updateStatusFromPod(tr, pod)
+	updateStatusFromPod(tr, pod, c.resourceLister, c.KubeClientSet, c.Logger)
 
 	after := tr.Status.GetCondition(apis.ConditionSucceeded)
 
@@ -324,7 +352,7 @@ func (c *Reconciler) reconcile(ctx context.Context, tr *v1alpha1.TaskRun) error 
 	return nil
 }
 
-func updateStatusFromPod(taskRun *v1alpha1.TaskRun, pod *corev1.Pod) {
+func updateStatusFromPod(taskRun *v1alpha1.TaskRun, pod *corev1.Pod, resourceLister listers.PipelineResourceLister, kubeclient kubernetes.Interface, logger *zap.SugaredLogger) {
 	if taskRun.Status.GetCondition(apis.ConditionSucceeded) == nil || taskRun.Status.GetCondition(apis.ConditionSucceeded).Status == corev1.ConditionUnknown {
 		// If the taskRunStatus doesn't exist yet, it's because we just started running
 		taskRun.Status.SetCondition(&apis.Condition{
@@ -362,11 +390,18 @@ func updateStatusFromPod(taskRun *v1alpha1.TaskRun, pod *corev1.Pod) {
 		// update tr completed time
 		taskRun.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 	case corev1.PodPending:
-		msg := getWaitingMessage(pod)
+		var reason, msg string
+		if isPodExceedingNodeResources(pod) {
+			reason = reasonExceededNodeResources
+			msg = getExceededResourcesMessage(taskRun)
+		} else {
+			reason = "Pending"
+			msg = getWaitingMessage(pod)
+		}
 		taskRun.Status.SetCondition(&apis.Condition{
 			Type:    apis.ConditionSucceeded,
 			Status:  corev1.ConditionUnknown,
-			Reason:  "Pending",
+			Reason:  reason,
 			Message: msg,
 		})
 	case corev1.PodSucceeded:
@@ -376,6 +411,26 @@ func updateStatusFromPod(taskRun *v1alpha1.TaskRun, pod *corev1.Pod) {
 		})
 		// update tr completed time
 		taskRun.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+	}
+
+	updateTaskRunResourceResult(taskRun, pod, resourceLister, kubeclient, logger)
+}
+
+func updateTaskRunResourceResult(taskRun *v1alpha1.TaskRun, pod *corev1.Pod, resourceLister listers.PipelineResourceLister, kubeclient kubernetes.Interface, logger *zap.SugaredLogger) {
+	if resources.TaskRunHasOutputImageResource(resourceLister.PipelineResources(taskRun.Namespace).Get, taskRun) && taskRun.IsSuccessful() {
+		for _, container := range pod.Spec.Containers {
+			if strings.HasPrefix(container.Name, imageDigestExporterContainerName) {
+				req := kubeclient.CoreV1().Pods(taskRun.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: container.Name})
+				logContent, err := req.Do().Raw()
+				if err != nil {
+					logger.Errorf("Error getting output from image-digest-exporter for %s/%s: %s", taskRun.Name, taskRun.Namespace, err)
+				}
+				err = resources.UpdateTaskRunStatusWithResourceResult(taskRun, logContent)
+				if err != nil {
+					logger.Errorf("Error getting output from image-digest-exporter for %s/%s: %s", taskRun.Name, taskRun.Namespace, err)
+				}
+			}
+		}
 	}
 }
 
@@ -452,7 +507,14 @@ func (c *Reconciler) updateLabels(tr *v1alpha1.TaskRun) (*v1alpha1.TaskRun, erro
 // volumeMount
 func (c *Reconciler) createPod(tr *v1alpha1.TaskRun, ts *v1alpha1.TaskSpec, taskName string) (*corev1.Pod, error) {
 	ts = ts.DeepCopy()
-	ts, err := resources.AddInputResource(c.KubeClientSet, taskName, ts, tr, c.resourceLister, c.Logger)
+
+	err := resources.AddOutputImageDigestExporter(tr, ts, c.resourceLister.PipelineResources(tr.Namespace).Get)
+	if err != nil {
+		c.Logger.Errorf("Failed to create a build for taskrun: %s due to output image resource error %v", tr.Name, err)
+		return nil, err
+	}
+
+	ts, err = resources.AddInputResource(c.KubeClientSet, taskName, ts, tr, c.resourceLister, c.Logger)
 	if err != nil {
 		c.Logger.Errorf("Failed to create a build for taskrun: %s due to input resource error %v", tr.Name, err)
 		return nil, err
@@ -530,30 +592,44 @@ func (c *Reconciler) checkTimeout(tr *v1alpha1.TaskRun, ts *v1alpha1.TaskSpec, d
 		return false, nil
 	}
 
-	if tr.Spec.Timeout != nil {
-		timeout := tr.Spec.Timeout.Duration
-		runtime := time.Since(tr.Status.StartTime.Time)
-
-		c.Logger.Infof("Checking timeout for TaskRun %q (startTime %s, timeout %s, runtime %s)", tr.Name, tr.Status.StartTime, timeout, runtime)
-		if runtime > timeout {
-			c.Logger.Infof("TaskRun %q is timeout (runtime %s over %s), deleting pod", tr.Name, runtime, timeout)
-			if err := dp(tr.Status.PodName, &metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-				c.Logger.Errorf("Failed to terminate pod: %v", err)
-				return true, err
-			}
-
-			timeoutMsg := fmt.Sprintf("TaskRun %q failed to finish within %q", tr.Name, timeout.String())
-			tr.Status.SetCondition(&apis.Condition{
-				Type:    apis.ConditionSucceeded,
-				Status:  corev1.ConditionFalse,
-				Reason:  reasonTimedOut,
-				Message: timeoutMsg,
-			})
-			// update tr completed time
-			tr.Status.CompletionTime = &metav1.Time{Time: time.Now()}
-
-			return true, nil
+	timeout := reconciler.GetTimeout(tr.Spec.Timeout)
+	runtime := time.Since(tr.Status.StartTime.Time)
+	c.Logger.Infof("Checking timeout for TaskRun %q (startTime %s, timeout %s, runtime %s)", tr.Name, tr.Status.StartTime, timeout, runtime)
+	if runtime > timeout {
+		c.Logger.Infof("TaskRun %q is timeout (runtime %s over %s), deleting pod", tr.Name, runtime, timeout)
+		if err := dp(tr.Status.PodName, &metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			c.Logger.Errorf("Failed to terminate pod: %v", err)
+			return true, err
 		}
+
+		timeoutMsg := fmt.Sprintf("TaskRun %q failed to finish within %q", tr.Name, timeout.String())
+		tr.Status.SetCondition(&apis.Condition{
+			Type:    apis.ConditionSucceeded,
+			Status:  corev1.ConditionFalse,
+			Reason:  reasonTimedOut,
+			Message: timeoutMsg,
+		})
+		// update tr completed time
+		tr.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+
+		return true, nil
 	}
 	return false, nil
+}
+
+func isPodExceedingNodeResources(pod *corev1.Pod) bool {
+	for _, podStatus := range pod.Status.Conditions {
+		if podStatus.Reason == corev1.PodReasonUnschedulable && strings.Contains(podStatus.Message, "Insufficient") {
+			return true
+		}
+	}
+	return false
+}
+
+func isExceededResourceQuotaError(err error) bool {
+	return err != nil && errors.IsForbidden(err) && strings.Contains(err.Error(), "exceeded quota")
+}
+
+func getExceededResourcesMessage(tr *v1alpha1.TaskRun) string {
+	return fmt.Sprintf("TaskRun pod %q exceeded available resources", tr.Name)
 }

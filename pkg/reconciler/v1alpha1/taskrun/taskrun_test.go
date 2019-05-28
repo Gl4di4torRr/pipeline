@@ -27,6 +27,8 @@ import (
 	"github.com/knative/pkg/configmap"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
+	fakeclientset "github.com/tektoncd/pipeline/pkg/client/clientset/versioned/fake"
+	informers "github.com/tektoncd/pipeline/pkg/client/informers/externalversions"
 	"github.com/tektoncd/pipeline/pkg/logging"
 	"github.com/tektoncd/pipeline/pkg/reconciler"
 	"github.com/tektoncd/pipeline/pkg/reconciler/v1alpha1/taskrun/entrypoint"
@@ -110,7 +112,10 @@ var (
 		)),
 		tb.TaskVolume("volume-configmap", tb.VolumeSource(corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
-				corev1.LocalObjectReference{"${inputs.params.configmapname}"}, nil, nil, nil},
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: "${inputs.params.configmapname}",
+				},
+			},
 		})),
 	))
 
@@ -180,9 +185,9 @@ func getRunName(tr *v1alpha1.TaskRun) string {
 
 // getTaskRunController returns an instance of the TaskRun controller/reconciler that has been seeded with
 // d, where d represents the state of the system (existing resources) needed for the test.
-func getTaskRunController(d test.Data) test.TestAssets {
+func getTaskRunController(t *testing.T, d test.Data) test.TestAssets {
 	entrypointCache, _ = entrypoint.NewCache()
-	c, i := test.SeedTestData(d)
+	c, i := test.SeedTestData(t, d)
 	observer, logs := observer.New(zap.InfoLevel)
 	configMapWatcher := configmap.NewInformedWatcher(c.Kube, system.GetNamespace())
 	stopCh := make(chan struct{})
@@ -440,13 +445,16 @@ func TestReconcile(t *testing.T) {
 					Name: "volume-configmap",
 					VolumeSource: corev1.VolumeSource{
 						ConfigMap: &corev1.ConfigMapVolumeSource{
-							corev1.LocalObjectReference{"configbar"}, nil, nil, nil},
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "configbar",
+							},
+						},
 					},
 				}, toolsVolume, workspaceVolume, homeVolume),
 				tb.PodRestartPolicy(corev1.RestartPolicyNever),
-				getCredentialsInitContainer("mz4c7"),
+				getCredentialsInitContainer("78c5n"),
 				getPlaceToolsInitContainer(),
-				tb.PodContainer("build-step-git-source-git-resource-9l9zj", "override-with-git:latest",
+				tb.PodContainer("build-step-git-source-git-resource-mssqb", "override-with-git:latest",
 					tb.Command(entrypointLocation),
 					tb.Args("-wait_file", "", "-post_file", "/builder/tools/0", "-entrypoint", "/ko-app/git-init", "--",
 						"-url", "https://foo.git", "-revision", "master", "-path", "/workspace/workspace"),
@@ -477,10 +485,40 @@ func TestReconcile(t *testing.T) {
 						tb.EphemeralStorage("0"),
 					)),
 				),
+				tb.PodContainer("build-step-image-digest-exporter-mycontainer-9l9zj", "override-with-imagedigest-exporter-image:latest",
+					tb.Command("/builder/tools/entrypoint"),
+					tb.Args("-wait_file", "/builder/tools/1", "-post_file", "/builder/tools/2", "-entrypoint", "/ko-app/imagedigestexporter", "--",
+						"-images", "[{\"name\":\"image-resource\",\"type\":\"image\",\"url\":\"gcr.io/kristoff/sven\",\"digest\":\"\",\"OutputImageDir\":\"\"}]"),
+					tb.WorkingDir(workspaceDir),
+					tb.EnvVar("HOME", "/builder/home"),
+					tb.VolumeMount("tools", "/builder/tools"),
+					tb.VolumeMount("workspace", workspaceDir),
+					tb.VolumeMount("home", "/builder/home"),
+					tb.Resources(tb.Requests(
+						tb.CPU("0"),
+						tb.Memory("0"),
+						tb.EphemeralStorage("0"),
+					)),
+				),
 				tb.PodContainer("build-step-myothercontainer", "myotherimage",
 					tb.Command(entrypointLocation),
-					tb.Args("-wait_file", "/builder/tools/1", "-post_file", "/builder/tools/2", "-entrypoint", "/mycmd", "--",
+					tb.Args("-wait_file", "/builder/tools/2", "-post_file", "/builder/tools/3", "-entrypoint", "/mycmd", "--",
 						"--my-other-arg=https://foo.git"),
+					tb.WorkingDir(workspaceDir),
+					tb.EnvVar("HOME", "/builder/home"),
+					tb.VolumeMount("tools", "/builder/tools"),
+					tb.VolumeMount("workspace", workspaceDir),
+					tb.VolumeMount("home", "/builder/home"),
+					tb.Resources(tb.Requests(
+						tb.CPU("0"),
+						tb.Memory("0"),
+						tb.EphemeralStorage("0"),
+					)),
+				),
+				tb.PodContainer("build-step-image-digest-exporter-myothercontainer-mz4c7", "override-with-imagedigest-exporter-image:latest",
+					tb.Command(entrypointLocation),
+					tb.Args("-wait_file", "/builder/tools/3", "-post_file", "/builder/tools/4", "-entrypoint", "/ko-app/imagedigestexporter", "--",
+						"-images", "[{\"name\":\"image-resource\",\"type\":\"image\",\"url\":\"gcr.io/kristoff/sven\",\"digest\":\"\",\"OutputImageDir\":\"\"}]"),
 					tb.WorkingDir(workspaceDir),
 					tb.EnvVar("HOME", "/builder/home"),
 					tb.VolumeMount("tools", "/builder/tools"),
@@ -494,7 +532,7 @@ func TestReconcile(t *testing.T) {
 				),
 				tb.PodContainer("nop", "override-with-nop:latest",
 					tb.Command("/builder/tools/entrypoint"),
-					tb.Args("-wait_file", "/builder/tools/2", "-post_file", "/builder/tools/3", "-entrypoint", "/ko-app/nop", "--"),
+					tb.Args("-wait_file", "/builder/tools/4", "-post_file", "/builder/tools/5", "-entrypoint", "/ko-app/nop", "--"),
 					tb.VolumeMount(entrypoint.MountName, entrypoint.MountPoint),
 				),
 			),
@@ -954,19 +992,21 @@ func TestReconcile(t *testing.T) {
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			names.TestingSeed()
-			testAssets := getTaskRunController(d)
+			testAssets := getTaskRunController(t, d)
 			c := testAssets.Controller
 			clients := testAssets.Clients
 			saName := tc.taskRun.Spec.ServiceAccount
 			if saName == "" {
 				saName = "default"
 			}
-			clients.Kube.CoreV1().ServiceAccounts(tc.taskRun.Namespace).Create(&corev1.ServiceAccount{
+			if _, err := clients.Kube.CoreV1().ServiceAccounts(tc.taskRun.Namespace).Create(&corev1.ServiceAccount{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      saName,
 					Namespace: tc.taskRun.Namespace,
 				},
-			})
+			}); err != nil {
+				t.Fatal(err)
+			}
 
 			entrypoint.AddToEntrypointCache(entrypointCache, "override-with-git:latest", []string{"/ko-app/git-init"})
 			entrypoint.AddToEntrypointCache(entrypointCache, "override-with-bash-noop:latest", []string{"/ko-app/bash"})
@@ -1026,7 +1066,7 @@ func TestReconcile_SetsStartTime(t *testing.T) {
 		TaskRuns: []*v1alpha1.TaskRun{taskRun},
 		Tasks:    []*v1alpha1.Task{simpleTask},
 	}
-	testAssets := getTaskRunController(d)
+	testAssets := getTaskRunController(t, d)
 
 	if err := testAssets.Controller.Reconciler.Reconcile(context.Background(), getRunName(taskRun)); err != nil {
 		t.Errorf("expected no error reconciling valid TaskRun but got %v", err)
@@ -1056,7 +1096,7 @@ func TestReconcile_DoesntChangeStartTime(t *testing.T) {
 			},
 		}},
 	}
-	testAssets := getTaskRunController(d)
+	testAssets := getTaskRunController(t, d)
 
 	if err := testAssets.Controller.Reconciler.Reconcile(context.Background(), getRunName(taskRun)); err != nil {
 		t.Errorf("expected no error reconciling valid TaskRun but got %v", err)
@@ -1099,7 +1139,7 @@ func TestReconcileInvalidTaskRuns(t *testing.T) {
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			testAssets := getTaskRunController(d)
+			testAssets := getTaskRunController(t, d)
 			c := testAssets.Controller
 			clients := testAssets.Clients
 			err := c.Reconciler.Reconcile(context.Background(), getRunName(tc.taskRun))
@@ -1135,7 +1175,7 @@ func TestReconcilePodFetchError(t *testing.T) {
 		Tasks:    []*v1alpha1.Task{simpleTask},
 	}
 
-	testAssets := getTaskRunController(d)
+	testAssets := getTaskRunController(t, d)
 	c := testAssets.Controller
 	clients := testAssets.Clients
 
@@ -1182,7 +1222,7 @@ func TestReconcilePodUpdateStatus(t *testing.T) {
 		Pods:     []*corev1.Pod{pod},
 	}
 
-	testAssets := getTaskRunController(d)
+	testAssets := getTaskRunController(t, d)
 	c := testAssets.Controller
 	clients := testAssets.Clients
 
@@ -1270,7 +1310,7 @@ func TestReconcileOnCompletedTaskRun(t *testing.T) {
 		Tasks: []*v1alpha1.Task{simpleTask},
 	}
 
-	testAssets := getTaskRunController(d)
+	testAssets := getTaskRunController(t, d)
 	c := testAssets.Controller
 	clients := testAssets.Clients
 
@@ -1281,7 +1321,7 @@ func TestReconcileOnCompletedTaskRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected completed TaskRun %s to exist but instead got error when getting it: %v", taskRun.Name, err)
 	}
-	if d := cmp.Diff(newTr.Status.GetCondition(apis.ConditionSucceeded), taskSt, ignoreLastTransitionTime); d != "" {
+	if d := cmp.Diff(taskSt, newTr.Status.GetCondition(apis.ConditionSucceeded), ignoreLastTransitionTime); d != "" {
 		t.Fatalf("-want, +got: %v", d)
 	}
 }
@@ -1299,7 +1339,7 @@ func TestReconcileOnCancelledTaskRun(t *testing.T) {
 		Tasks:    []*v1alpha1.Task{simpleTask},
 	}
 
-	testAssets := getTaskRunController(d)
+	testAssets := getTaskRunController(t, d)
 	c := testAssets.Controller
 	clients := testAssets.Clients
 
@@ -1317,47 +1357,75 @@ func TestReconcileOnCancelledTaskRun(t *testing.T) {
 		Reason:  "TaskRunCancelled",
 		Message: `TaskRun "test-taskrun-run-cancelled" was cancelled`,
 	}
-	if d := cmp.Diff(newTr.Status.GetCondition(apis.ConditionSucceeded), expectedStatus, ignoreLastTransitionTime); d != "" {
+	if d := cmp.Diff(expectedStatus, newTr.Status.GetCondition(apis.ConditionSucceeded), ignoreLastTransitionTime); d != "" {
 		t.Fatalf("-want, +got: %v", d)
 	}
 }
 
-func TestReconcileOnTimedOutTaskRun(t *testing.T) {
-	taskRun := tb.TaskRun("test-taskrun-timeout", "foo",
-		tb.TaskRunSpec(
-			tb.TaskRunTaskRef(simpleTask.Name),
-			tb.TaskRunTimeout(10*time.Second),
-		),
-		tb.TaskRunStatus(tb.Condition(apis.Condition{
-			Type:   apis.ConditionSucceeded,
-			Status: corev1.ConditionUnknown}),
-			tb.TaskRunStartTime(time.Now().Add(-15*time.Second))))
-
-	d := test.Data{
-		TaskRuns: []*v1alpha1.TaskRun{taskRun},
-		Tasks:    []*v1alpha1.Task{simpleTask},
+func TestReconcileTimeouts(t *testing.T) {
+	type testCase struct {
+		taskRun        *v1alpha1.TaskRun
+		expectedStatus *apis.Condition
 	}
 
-	testAssets := getTaskRunController(d)
-	c := testAssets.Controller
-	clients := testAssets.Clients
+	testcases := []testCase{
+		{
+			taskRun: tb.TaskRun("test-taskrun-timeout", "foo",
+				tb.TaskRunSpec(
+					tb.TaskRunTaskRef(simpleTask.Name),
+					tb.TaskRunTimeout(10*time.Second),
+				),
+				tb.TaskRunStatus(tb.Condition(apis.Condition{
+					Type:   apis.ConditionSucceeded,
+					Status: corev1.ConditionUnknown}),
+					tb.TaskRunStartTime(time.Now().Add(-15*time.Second)))),
 
-	if err := c.Reconciler.Reconcile(context.Background(), fmt.Sprintf("%s/%s", taskRun.Namespace, taskRun.Name)); err != nil {
-		t.Fatalf("Unexpected error when reconciling completed TaskRun : %v", err)
-	}
-	newTr, err := clients.Pipeline.TektonV1alpha1().TaskRuns(taskRun.Namespace).Get(taskRun.Name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Expected completed TaskRun %s to exist but instead got error when getting it: %v", taskRun.Name, err)
+			expectedStatus: &apis.Condition{
+				Type:    apis.ConditionSucceeded,
+				Status:  corev1.ConditionFalse,
+				Reason:  "TaskRunTimeout",
+				Message: `TaskRun "test-taskrun-timeout" failed to finish within "10s"`,
+			},
+		},
+		{
+			taskRun: tb.TaskRun("test-taskrun-default-timeout-10-minutes", "foo",
+				tb.TaskRunSpec(
+					tb.TaskRunTaskRef(simpleTask.Name),
+				),
+				tb.TaskRunStatus(tb.Condition(apis.Condition{
+					Type:   apis.ConditionSucceeded,
+					Status: corev1.ConditionUnknown}),
+					tb.TaskRunStartTime(time.Now().Add(-11*time.Minute)))),
+
+			expectedStatus: &apis.Condition{
+				Type:    apis.ConditionSucceeded,
+				Status:  corev1.ConditionFalse,
+				Reason:  "TaskRunTimeout",
+				Message: `TaskRun "test-taskrun-default-timeout-10-minutes" failed to finish within "10m0s"`,
+			},
+		},
 	}
 
-	expectedStatus := &apis.Condition{
-		Type:    apis.ConditionSucceeded,
-		Status:  corev1.ConditionFalse,
-		Reason:  "TaskRunTimeout",
-		Message: `TaskRun "test-taskrun-timeout" failed to finish within "10s"`,
-	}
-	if d := cmp.Diff(newTr.Status.GetCondition(apis.ConditionSucceeded), expectedStatus, ignoreLastTransitionTime); d != "" {
-		t.Fatalf("-want, +got: %v", d)
+	for _, tc := range testcases {
+		d := test.Data{
+			TaskRuns: []*v1alpha1.TaskRun{tc.taskRun},
+			Tasks:    []*v1alpha1.Task{simpleTask},
+		}
+		testAssets := getTaskRunController(t, d)
+		c := testAssets.Controller
+		clients := testAssets.Clients
+
+		if err := c.Reconciler.Reconcile(context.Background(), fmt.Sprintf("%s/%s", tc.taskRun.Namespace, tc.taskRun.Name)); err != nil {
+			t.Fatalf("Unexpected error when reconciling completed TaskRun : %v", err)
+		}
+		newTr, err := clients.Pipeline.TektonV1alpha1().TaskRuns(tc.taskRun.Namespace).Get(tc.taskRun.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("Expected completed TaskRun %s to exist but instead got error when getting it: %v", tc.taskRun.Name, err)
+		}
+		condition := newTr.Status.GetCondition(apis.ConditionSucceeded)
+		if d := cmp.Diff(tc.expectedStatus, condition, ignoreLastTransitionTime); d != "" {
+			t.Fatalf("-want, +got: %v", d)
+		}
 	}
 }
 
@@ -1650,8 +1718,53 @@ func TestUpdateStatusFromPod(t *testing.T) {
 			},
 			Steps: []v1alpha1.StepState{},
 		},
+	}, {
+		desc: "pending-not-enough-node-resources",
+		podStatus: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{{
+				Reason:  corev1.PodReasonUnschedulable,
+				Message: "0/1 nodes are available: 1 Insufficient cpu.",
+			}},
+		},
+		want: v1alpha1.TaskRunStatus{
+			Status: duckv1beta1.Status{
+				Conditions: []apis.Condition{{
+					Type:    apis.ConditionSucceeded,
+					Status:  corev1.ConditionUnknown,
+					Reason:  reasonExceededNodeResources,
+					Message: `TaskRun pod "taskRun" exceeded available resources`,
+				}},
+			},
+			Steps: []v1alpha1.StepState{},
+		},
 	}} {
 		t.Run(c.desc, func(t *testing.T) {
+			observer, _ := observer.New(zap.InfoLevel)
+			logger := zap.New(observer).Sugar()
+			fakeClient := fakeclientset.NewSimpleClientset()
+			sharedInfomer := informers.NewSharedInformerFactory(fakeClient, 0)
+			pipelineResourceInformer := sharedInfomer.Tekton().V1alpha1().PipelineResources()
+			resourceLister := pipelineResourceInformer.Lister()
+			fakekubeclient := fakekubeclientset.NewSimpleClientset()
+
+			rs := []*v1alpha1.PipelineResource{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "source-image",
+					Namespace: "marshmallow",
+				},
+				Spec: v1alpha1.PipelineResourceSpec{
+					Type: "image",
+				},
+			}}
+
+			for _, r := range rs {
+				err := pipelineResourceInformer.Informer().GetIndexer().Add(r)
+				if err != nil {
+					t.Errorf("pipelineResourceInformer.Informer().GetIndexer().Add(r) failed with err: %s", err)
+				}
+			}
+
 			now := metav1.Now()
 			p := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1663,7 +1776,7 @@ func TestUpdateStatusFromPod(t *testing.T) {
 			}
 			startTime := time.Date(2010, 1, 1, 1, 1, 1, 1, time.UTC)
 			tr := tb.TaskRun("taskRun", "foo", tb.TaskRunStatus(tb.TaskRunStartTime(startTime)))
-			updateStatusFromPod(tr, p)
+			updateStatusFromPod(tr, p, resourceLister, fakekubeclient, logger)
 
 			// Common traits, set for test case brevity.
 			c.want.PodName = "pod"

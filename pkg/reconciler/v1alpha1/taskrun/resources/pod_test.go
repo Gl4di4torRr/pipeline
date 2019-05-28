@@ -19,6 +19,7 @@ package resources
 import (
 	"crypto/rand"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -115,19 +116,6 @@ func TestTryGetPod(t *testing.T) {
 
 func TestMakePod(t *testing.T) {
 	names.TestingSeed()
-	subPath := "subpath"
-	implicitVolumeMountsWithSubPath := []corev1.VolumeMount{}
-	for _, vm := range implicitVolumeMounts {
-		if vm.Name == "workspace" {
-			implicitVolumeMountsWithSubPath = append(implicitVolumeMountsWithSubPath, corev1.VolumeMount{
-				Name:      vm.Name,
-				MountPath: vm.MountPath,
-				SubPath:   subPath,
-			})
-		} else {
-			implicitVolumeMountsWithSubPath = append(implicitVolumeMountsWithSubPath, vm)
-		}
-	}
 
 	implicitVolumeMountsWithSecrets := append(implicitVolumeMounts, corev1.VolumeMount{
 		Name:      "secret-volume-multi-creds-9l9zj",
@@ -314,6 +302,52 @@ func TestMakePod(t *testing.T) {
 			},
 			Volumes: implicitVolumes,
 		},
+	}, {
+		desc: "working-dir-in-workspace-dir",
+		ts: v1alpha1.TaskSpec{
+			Steps: []corev1.Container{{
+				Name:       "name",
+				Image:      "image",
+				WorkingDir: filepath.Join(workspaceDir, "test"),
+			}},
+		},
+		want: &corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			InitContainers: []corev1.Container{{
+				Name:         containerPrefix + credsInit + "-9l9zj",
+				Image:        *credsImage,
+				Command:      []string{"/ko-app/creds-init"},
+				Args:         []string{},
+				Env:          implicitEnvVars,
+				VolumeMounts: implicitVolumeMounts,
+				WorkingDir:   workspaceDir,
+			}, {
+				Name:         containerPrefix + workingDirInit + "-mz4c7",
+				Image:        *v1alpha1.BashNoopImage,
+				Command:      []string{"/ko-app/bash"},
+				Args:         []string{"-args", fmt.Sprintf("mkdir -p %s", filepath.Join(workspaceDir, "test"))},
+				Env:          implicitEnvVars,
+				VolumeMounts: implicitVolumeMounts,
+				WorkingDir:   workspaceDir,
+			}},
+			Containers: []corev1.Container{{
+				Name:         "build-step-name",
+				Image:        "image",
+				Env:          implicitEnvVars,
+				VolumeMounts: implicitVolumeMounts,
+				WorkingDir:   filepath.Join(workspaceDir, "test"),
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("0"),
+						corev1.ResourceMemory:           resource.MustParse("0"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("0"),
+					},
+				},
+			},
+				nopContainer,
+			},
+			Volumes: implicitVolumes,
+		},
 	}} {
 		t.Run(c.desc, func(t *testing.T) {
 			names.TestingSeed()
@@ -370,6 +404,32 @@ func TestMakePod(t *testing.T) {
 			}
 			if d := cmp.Diff(got.Annotations, wantAnnotations); d != "" {
 				t.Errorf("Diff annotations:\n%s", d)
+			}
+		})
+	}
+}
+
+func TestMakeWorkingDirScript(t *testing.T) {
+	for _, c := range []struct {
+		desc        string
+		workingDirs map[string]bool
+		want        string
+	}{{
+		desc:        "default",
+		workingDirs: map[string]bool{"/workspace": true},
+		want:        "",
+	}, {
+		desc:        "simple",
+		workingDirs: map[string]bool{"/workspace/foo": true, "/workspace/bar": true, "/baz": true},
+		want:        "mkdir -p /workspace/bar /workspace/foo",
+	}, {
+		desc:        "empty",
+		workingDirs: map[string]bool{"/workspace": true, "": true, "/baz": true, "/workspacedir": true},
+		want:        "",
+	}} {
+		t.Run(c.desc, func(t *testing.T) {
+			if script := makeWorkingDirScript(c.workingDirs); script != c.want {
+				t.Errorf("Expected `%v`, got `%v`", c.want, script)
 			}
 		})
 	}

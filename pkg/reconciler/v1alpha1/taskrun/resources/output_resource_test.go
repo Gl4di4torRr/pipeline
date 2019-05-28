@@ -35,7 +35,7 @@ var (
 	outputpipelineResourceLister listers.PipelineResourceLister
 )
 
-func outputResourceSetup() {
+func outputResourceSetup(t *testing.T) {
 	logger, _ = logging.NewLogger("", "")
 	fakeClient := fakeclientset.NewSimpleClientset()
 	sharedInfomer := informers.NewSharedInformerFactory(fakeClient, 0)
@@ -99,7 +99,9 @@ func outputResourceSetup() {
 	}}
 
 	for _, r := range rs {
-		pipelineResourceInformer.Informer().GetIndexer().Add(r)
+		if err := pipelineResourceInformer.Informer().GetIndexer().Add(r); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 func TestValidOutputResources(t *testing.T) {
@@ -606,6 +608,45 @@ func TestValidOutputResources(t *testing.T) {
 		},
 		wantSteps: nil,
 	}, {
+		name: "Resource with TargetPath as output",
+		desc: "Resource with TargetPath defined only in output",
+		taskRun: &v1alpha1.TaskRun{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-taskrun-run-only-output-step",
+				Namespace: "marshmallow",
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: "PipelineRun",
+					Name: "pipelinerun",
+				}},
+			},
+			Spec: v1alpha1.TaskRunSpec{
+				Outputs: v1alpha1.TaskRunOutputs{
+					Resources: []v1alpha1.TaskResourceBinding{{
+						Name: "source-workspace",
+						ResourceRef: v1alpha1.PipelineResourceRef{
+							Name: "source-image",
+						},
+					}},
+				},
+			},
+		},
+		task: &v1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "task1",
+				Namespace: "marshmallow",
+			},
+			Spec: v1alpha1.TaskSpec{
+				Outputs: &v1alpha1.Outputs{
+					Resources: []v1alpha1.TaskResource{{
+						Name:       "source-workspace",
+						Type:       "image",
+						TargetPath: "/workspace",
+					}},
+				},
+			},
+		},
+		wantSteps: nil,
+	}, {
 		desc: "image output resource with no steps",
 		taskRun: &v1alpha1.TaskRun{
 			ObjectMeta: metav1.ObjectMeta{
@@ -641,7 +682,7 @@ func TestValidOutputResources(t *testing.T) {
 	}} {
 		t.Run(c.name, func(t *testing.T) {
 			names.TestingSeed()
-			outputResourceSetup()
+			outputResourceSetup(t)
 			fakekubeclient := fakek8s.NewSimpleClientset()
 			err := AddOutputResources(fakekubeclient, c.task.Name, &c.task.Spec, c.taskRun, outputpipelineResourceLister, logger)
 			if err != nil {
@@ -674,12 +715,11 @@ func TestValidOutputResources(t *testing.T) {
 
 func TestValidOutputResourcesWithBucketStorage(t *testing.T) {
 	for _, c := range []struct {
-		name        string
-		desc        string
-		task        *v1alpha1.Task
-		taskRun     *v1alpha1.TaskRun
-		wantSteps   []corev1.Container
-		wantVolumes []corev1.Volume
+		name      string
+		desc      string
+		task      *v1alpha1.Task
+		taskRun   *v1alpha1.TaskRun
+		wantSteps []corev1.Container
 	}{{
 		name: "git resource in input and output with bucket storage",
 		desc: "git resource declared as both input and output with pipelinerun owner reference",
@@ -817,7 +857,7 @@ func TestValidOutputResourcesWithBucketStorage(t *testing.T) {
 		},
 	}} {
 		t.Run(c.name, func(t *testing.T) {
-			outputResourceSetup()
+			outputResourceSetup(t)
 			names.TestingSeed()
 			fakekubeclient := fakek8s.NewSimpleClientset(
 				&corev1.ConfigMap{
@@ -844,11 +884,10 @@ func TestValidOutputResourcesWithBucketStorage(t *testing.T) {
 
 func TestInValidOutputResources(t *testing.T) {
 	for _, c := range []struct {
-		desc      string
-		task      *v1alpha1.Task
-		taskRun   *v1alpha1.TaskRun
-		wantSteps []corev1.Container
-		wantErr   bool
+		desc    string
+		task    *v1alpha1.Task
+		taskRun *v1alpha1.TaskRun
+		wantErr bool
 	}{{
 		desc: "git declared in both resource spec and resource ref",
 		taskRun: &v1alpha1.TaskRun{
@@ -1071,7 +1110,7 @@ func TestInValidOutputResources(t *testing.T) {
 		wantErr: true,
 	}} {
 		t.Run(c.desc, func(t *testing.T) {
-			outputResourceSetup()
+			outputResourceSetup(t)
 			fakekubeclient := fakek8s.NewSimpleClientset()
 			err := AddOutputResources(fakekubeclient, c.task.Name, &c.task.Spec, c.taskRun, outputpipelineResourceLister, logger)
 			if (err != nil) != c.wantErr {

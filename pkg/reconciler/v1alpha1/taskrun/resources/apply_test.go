@@ -17,7 +17,6 @@ limitations under the License.
 package resources
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -182,22 +181,6 @@ func TestApplyParameters(t *testing.T) {
 	}
 }
 
-type rg struct {
-	resources map[string]*v1alpha1.PipelineResource
-}
-
-func (rg *rg) Get(name string) (*v1alpha1.PipelineResource, error) {
-	if pr, ok := rg.resources[name]; ok {
-		return pr, nil
-	}
-	return nil, fmt.Errorf("resource %s does not exist", name)
-}
-
-func (rg *rg) With(name string, pr *v1alpha1.PipelineResource) *rg {
-	rg.resources[name] = pr
-	return rg
-}
-
 var mockGetter = func(n string) (*v1alpha1.PipelineResource, error) { return &v1alpha1.PipelineResource{}, nil }
 var gitResourceGetter = func(n string) (*v1alpha1.PipelineResource, error) { return gitResource, nil }
 var imageResourceGetter = func(n string) (*v1alpha1.PipelineResource, error) { return imageResource, nil }
@@ -295,10 +278,9 @@ func TestVolumeReplacement(t *testing.T) {
 				Name: "${name}",
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
-						corev1.LocalObjectReference{"${configmapname}"},
-						nil,
-						nil,
-						nil,
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "${configmapname}",
+						},
 					},
 				}},
 			},
@@ -312,10 +294,9 @@ func TestVolumeReplacement(t *testing.T) {
 				Name: "myname",
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
-						corev1.LocalObjectReference{"cfgmapname"},
-						nil,
-						nil,
-						nil,
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "cfgmapname",
+						},
 					},
 				}},
 			},
@@ -327,10 +308,7 @@ func TestVolumeReplacement(t *testing.T) {
 				Name: "${name}",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						"${secretname}",
-						nil,
-						nil,
-						nil,
+						SecretName: "${secretname}",
 					},
 				}},
 			},
@@ -344,10 +322,7 @@ func TestVolumeReplacement(t *testing.T) {
 				Name: "mysecret",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						"totallysecure",
-						nil,
-						nil,
-						nil,
+						SecretName: "totallysecure",
 					},
 				}},
 			},

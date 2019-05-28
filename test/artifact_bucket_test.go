@@ -48,7 +48,7 @@ func TestStorageBucketPipelineRun(t *testing.T) {
 		t.Skip("GCP_SERVICE_ACCOUNT_KEY_PATH variable is not set.")
 	}
 	c, namespace := setup(t)
-	t.Parallel()
+	// Bucket tests can't run in parallel without causing issues with other tests.
 
 	knativetest.CleanupOnInterrupt(func() { tearDown(t, c, namespace) }, t.Logf)
 	defer tearDown(t, c, namespace)
@@ -108,8 +108,10 @@ func TestStorageBucketPipelineRun(t *testing.T) {
 		v1alpha1.BucketServiceAccountSecretName: bucketSecretName,
 		v1alpha1.BucketServiceAccountSecretKey:  bucketSecretKey,
 	}
-	c.KubeClient.UpdateConfigMap(systemNamespace, v1alpha1.BucketConfigName, configMapData)
-	defer resetConfigMap(c, systemNamespace, v1alpha1.BucketConfigName, originalConfigMapData)
+	if err := updateConfigMap(c.KubeClient, systemNamespace, v1alpha1.BucketConfigName, configMapData); err != nil {
+		t.Fatal(err)
+	}
+	defer resetConfigMap(t, c, systemNamespace, v1alpha1.BucketConfigName, originalConfigMapData)
 
 	t.Logf("Creating Git PipelineResource %s", helloworldResourceName)
 	helloworldResource := tb.PipelineResource(helloworldResourceName, namespace, tb.PipelineResourceSpec(
@@ -185,6 +187,26 @@ func TestStorageBucketPipelineRun(t *testing.T) {
 	}
 }
 
+// updateConfigMap updates the config map for specified @name with values. We can't use the one from knativetest because
+// it assumes that Data is already a non-nil map, and by default, it isn't!
+func updateConfigMap(client *knativetest.KubeClient, name string, configName string, values map[string]string) error {
+	configMap, err := client.GetConfigMap(name).Get(configName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	if configMap.Data == nil {
+		configMap.Data = make(map[string]string)
+	}
+
+	for key, value := range values {
+		configMap.Data[key] = value
+	}
+
+	_, err = client.GetConfigMap(name).Update(configMap)
+	return err
+}
+
 func getBucketSecret(t *testing.T, configFilePath, namespace string) *corev1.Secret {
 	t.Helper()
 	f, err := ioutil.ReadFile(configFilePath)
@@ -208,8 +230,10 @@ func deleteBucketSecret(c *clients, t *testing.T, namespace string) {
 	}
 }
 
-func resetConfigMap(c *clients, namespace, configName string, values map[string]string) error {
-	return c.KubeClient.UpdateConfigMap(namespace, configName, values)
+func resetConfigMap(t *testing.T, c *clients, namespace, configName string, values map[string]string) {
+	if err := updateConfigMap(c.KubeClient, namespace, configName, values); err != nil {
+		t.Log(err)
+	}
 }
 
 func runTaskToDeleteBucket(c *clients, t *testing.T, namespace, bucketName, bucketSecretName, bucketSecretKey string) {

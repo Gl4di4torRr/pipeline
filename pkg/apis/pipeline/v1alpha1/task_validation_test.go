@@ -31,6 +31,11 @@ var validResource = TaskResource{
 	Type: "git",
 }
 
+var validImageResource = TaskResource{
+	Name: "source",
+	Type: "image",
+}
+
 var validBuildSteps = []corev1.Container{{
 	Name:  "mystep",
 	Image: "myimage",
@@ -43,9 +48,10 @@ var invalidBuildSteps = []corev1.Container{{
 
 func TestTaskSpecValidate(t *testing.T) {
 	type fields struct {
-		Inputs     *Inputs
-		Outputs    *Outputs
-		BuildSteps []corev1.Container
+		Inputs            *Inputs
+		Outputs           *Outputs
+		BuildSteps        []corev1.Container
+		ContainerTemplate *corev1.Container
 	}
 	tests := []struct {
 		name   string
@@ -85,6 +91,17 @@ func TestTaskSpecValidate(t *testing.T) {
 			BuildSteps: validBuildSteps,
 		},
 	}, {
+		name: "output image resoure",
+		fields: fields{
+			Inputs: &Inputs{
+				Resources: []TaskResource{validImageResource},
+			},
+			Outputs: &Outputs{
+				Resources: []TaskResource{validImageResource},
+			},
+			BuildSteps: validBuildSteps,
+		},
+	}, {
 		name: "valid template variable",
 		fields: fields{
 			Inputs: &Inputs{
@@ -108,15 +125,30 @@ func TestTaskSpecValidate(t *testing.T) {
 				WorkingDir: "/foo/bar/${outputs.resources.source}",
 			}},
 		},
+	}, {
+		name: "container template included in validation",
+		fields: fields{
+			BuildSteps: []corev1.Container{{
+				Name:    "astep",
+				Command: []string{"echo"},
+				Args:    []string{"hello"},
+			}},
+			ContainerTemplate: &corev1.Container{
+				Image: "some-image",
+			},
+		},
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := &TaskSpec{
-				Inputs:  tt.fields.Inputs,
-				Outputs: tt.fields.Outputs,
-				Steps:   tt.fields.BuildSteps,
+				Inputs:            tt.fields.Inputs,
+				Outputs:           tt.fields.Outputs,
+				Steps:             tt.fields.BuildSteps,
+				ContainerTemplate: tt.fields.ContainerTemplate,
 			}
-			if err := ts.Validate(context.Background()); err != nil {
+			ctx := context.Background()
+			ts.SetDefaults(ctx)
+			if err := ts.Validate(ctx); err != nil {
 				t.Errorf("TaskSpec.Validate() = %v", err)
 			}
 		})

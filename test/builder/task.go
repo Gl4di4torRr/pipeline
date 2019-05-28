@@ -303,6 +303,12 @@ func Condition(condition apis.Condition) TaskRunStatusOp {
 	}
 }
 
+func Retry(retry v1alpha1.TaskRunStatus) TaskRunStatusOp {
+	return func(s *v1alpha1.TaskRunStatus) {
+		s.RetriesStatus = append(s.RetriesStatus, retry)
+	}
+}
+
 // StepState adds a StepState to the TaskRunStatus.
 func StepState(ops ...StepStateOp) TaskRunStatusOp {
 	return func(s *v1alpha1.TaskRunStatus) {
@@ -441,16 +447,6 @@ func TaskRunTaskSpec(ops ...TaskSpecOp) TaskRunSpecOp {
 			op(taskSpec)
 		}
 		spec.TaskSpec = taskSpec
-	}
-}
-
-// TaskTrigger set the TaskTrigger, with specified name and type, to the TaskRunSpec.
-func TaskTrigger(name string, triggerType v1alpha1.TaskTriggerType) TaskRunSpecOp {
-	return func(trs *v1alpha1.TaskRunSpec) {
-		trs.Trigger = v1alpha1.TaskTrigger{
-			Name: name,
-			Type: triggerType,
-		}
 	}
 }
 

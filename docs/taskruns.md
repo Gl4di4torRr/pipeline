@@ -37,10 +37,6 @@ following fields:
     your `TaskRun` resource object.
     - [`taskRef` or `taskSpec`](#specifying-a-task) - Specifies the details of
       the [`Task`](tasks.md) you want to run
-    - `trigger` - Provides data about what created this `TaskRun`. Can be
-      `manual` if you are creating this manually, or has a value of
-      `PipelineRun` if it is created as part of a
-      [`PipelineRun`](pipelineruns.md)
 - Optional:
 
   - [`serviceAccount`](#service-account) - Specifies a `ServiceAccount` resource
@@ -49,7 +45,8 @@ following fields:
   - [`inputs`] - Specifies [input parameters](#input-parameters) and
     [input resources](#providing-resources)
   - [`outputs`] - Specifies [output resources](#providing-resources)
-  - `timeout` - Specifies timeout after which the `TaskRun` will fail.
+  - `timeout` - Specifies timeout after which the `TaskRun` will fail. Defaults
+    to ten minutes.
   - [`nodeSelector`] - a selector which must be true for the pod to fit on a
     node. The selector which must match a node's labels for the pod to be
     scheduled on that node. More info:
@@ -88,6 +85,10 @@ spec:
     steps:
       - name: build-and-push
         image: gcr.io/kaniko-project/executor
+        # specifying DOCKER_CONFIG is required to allow kaniko to detect docker credential
+        env:
+          - name: "DOCKER_CONFIG"
+            value: "/builder/home/.docker/"
         command:
           - /kaniko/executor
         args:
@@ -263,8 +264,6 @@ metadata:
 spec:
   taskRef:
     name: read-task
-  trigger:
-    type: manual
   inputs:
     resources:
       - name: workspace
@@ -322,8 +321,6 @@ kind: TaskRun
 metadata:
   name: build-push-task-run-2
 spec:
-  trigger:
-    type: manual
   inputs:
     resources:
       - name: workspace
@@ -337,6 +334,10 @@ spec:
     steps:
       - name: build-and-push
         image: gcr.io/kaniko-project/executor
+        # specifying DOCKER_CONFIG is required to allow kaniko to detect docker credential
+        env:
+          - name: "DOCKER_CONFIG"
+            value: "/builder/home/.docker/"
         command:
           - /kaniko/executor
         args:
@@ -356,8 +357,6 @@ metadata:
 spec:
   taskRef:
     name: read-task
-  trigger:
-    type: manual
   inputs:
     resources:
       - name: workspace

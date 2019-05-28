@@ -25,6 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tektoncd/pipeline/pkg/artifacts"
+	"k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/knative/pkg/apis"
 	knativetest "github.com/knative/pkg/test"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline"
@@ -124,7 +127,7 @@ func TestPipelineRun(t *testing.T) {
 			td.testSetup(t, c, namespace, i)
 
 			prName := fmt.Sprintf("%s%d", pipelineRunName, i)
-			_, err := c.PipelineRunClient.Create(td.pipelineRunFunc(i, namespace))
+			pipelineRun, err := c.PipelineRunClient.Create(td.pipelineRunFunc(i, namespace))
 			if err != nil {
 				t.Fatalf("Failed to create PipelineRun `%s`: %s", prName, err)
 			}
@@ -171,6 +174,15 @@ func TestPipelineRun(t *testing.T) {
 			}
 			if len(events) != td.expectedNumberOfEvents {
 				t.Fatalf("Expected %d number of successful events from pipelinerun and taskrun but got %d; list of receieved events : %#v", td.expectedNumberOfEvents, len(events), events)
+			}
+			// Check to make sure the PipelineRun's artifact storage PVC has been "deleted" at the end of the run.
+			pvc, err := c.KubeClient.Kube.CoreV1().PersistentVolumeClaims(namespace).Get(artifacts.GetPVCName(pipelineRun), metav1.GetOptions{})
+			if err != nil {
+				if !errors.IsNotFound(err) {
+					t.Fatalf("Error looking up PVC %s for PipelineRun %s: %s", artifacts.GetPVCName(pipelineRun), prName, err)
+				}
+			} else if pvc.DeletionTimestamp == nil {
+				t.Fatalf("PVC %s still exists after PipelineRun %s has completed: %v", artifacts.GetPVCName(pipelineRun), prName, pvc)
 			}
 			t.Logf("Successfully finished test %q", td.name)
 		})
@@ -329,12 +341,6 @@ func getName(namespace string, suffix int) string {
 	return fmt.Sprintf("%s%d", namespace, suffix)
 }
 
-func newHostPathType(pathType string) *corev1.HostPathType {
-	hostPathType := new(corev1.HostPathType)
-	*hostPathType = corev1.HostPathType(pathType)
-	return hostPathType
-}
-
 // collectMatchingEvents collects list of events under 5 seconds that match
 // 1. matchKinds which is a map of Kind of Object with name of objects
 // 2. reason which is the expected reason of event
@@ -410,11 +416,15 @@ func checkLabelPropagation(t *testing.T, c *clients, namespace string, pipelineR
 	}
 	assertLabelsMatch(t, labels, tr.ObjectMeta.Labels)
 
-	// Check label propagation to Pods.
-	pod := getPodForTaskRun(t, c.KubeClient, namespace, tr)
+	// PodName is "" iff a retry happened and pod is deleted
 	// This label is added to every Pod by the TaskRun controller
-	labels[pipeline.GroupName+pipeline.TaskRunLabelKey] = tr.Name
-	assertLabelsMatch(t, labels, pod.ObjectMeta.Labels)
+	if tr.Status.PodName != "" {
+		// Check label propagation to Pods.
+		pod := getPodForTaskRun(t, c.KubeClient, namespace, tr)
+		// This label is added to every Pod by the TaskRun controller
+		labels[pipeline.GroupName+pipeline.TaskRunLabelKey] = tr.Name
+		assertLabelsMatch(t, labels, pod.ObjectMeta.Labels)
+	}
 }
 
 func getPodForTaskRun(t *testing.T, kubeClient *knativetest.KubeClient, namespace string, tr *v1alpha1.TaskRun) *corev1.Pod {

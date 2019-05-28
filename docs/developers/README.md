@@ -13,7 +13,7 @@ on path `/pvc` by PipelineRun.
   `/pvc/task_name/resource_name`.
 
 - If an input resource includes `from` condition then the `TaskRun` controller
-  adds a step to copy from PVC to directory path
+  adds a step to copy from PVC directory path:
   `/pvc/previous_task/resource_name`.
 
 Another alternatives is to use a GCS storage bucket to share the artifacts. This
@@ -68,6 +68,24 @@ expected in directory path `/workspace/output/resource_name`.
           type: storage
   ```
 
+- If the resource is declared only in output but not in input for task and the
+  resource defined with `TargetPath` then the copy step includes resource being
+  copied to PVC to path `/pvc/task_name/resource_name` from
+  `/workspace/outputstuff` like the following example.
+
+  ```yaml
+  kind: Task
+  metadata:
+    name: get-gcs-task
+    namespace: default
+  spec:
+    outputs:
+      resources:
+        - name: gcs-workspace
+          type: storage
+          targetPath: /workspace/outputstuff
+  ```
+
 - If the resource is declared both in input and output for task the then copy
   step includes resource being copied to PVC to path
   `/pvc/task_name/resource_name` from `/workspace/random-space/` if input
@@ -93,8 +111,8 @@ expected in directory path `/workspace/output/resource_name`.
 
   - If resource is declared both in input and output for task without custom
     target directory then copy step includes resource being copied to PVC to
-    path `/pvc/task_name/resource_name` from `/workspace/random-space/` like the
-    following example.
+    path `/pvc/task_name/resource_name` from `/workspace/resource_name/` like
+    the following example.
 
   ```yaml
   kind: Task
@@ -128,3 +146,12 @@ with the binary and file(s) is mounted.
 
 If the image is a private registry, the service account should include an
 [ImagePullSecret](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#add-imagepullsecrets-to-a-service-account)
+
+## Builder namespace on containers
+
+The `/builder/` namespace is reserved on containers for various system tools,
+such as the following:
+
+- The environment variable HOME is set to `/builder/home`, used by the builder
+  tools and injected on into all of the step containers
+- Default location for output-images `/builder/output-images`
